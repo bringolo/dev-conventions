@@ -1,0 +1,5 @@
+# Auto-detect text files and normalize line endings (LF in repo)
+* text=auto
+
+# Force LF for markdown files (must work on Linux for deployment docs)
+*.md text eol=lf
