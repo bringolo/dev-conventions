@@ -418,6 +418,47 @@ set -euo pipefail    # Exit on error, undefined vars, pipe failures
 - Colored output: `RED`, `GREEN`, `YELLOW`, `BLUE`, `NC` (No Color)
 - Functions for each phase, called sequentially from `main()`
 
+**Phase 7 — Services step detail:**
+
+**Rule:** The services phase must follow this exact sequence: copy unit files, daemon-reload, restart, enable. Skipping any step causes a different class of failure.
+
+**Rationale:** Each step exists for a specific reason:
+
+1. **Copy unit files** from `deployment/` to `/etc/systemd/system/` — ensures the running configuration matches the repository. Without this, a deploy that changes a unit file (e.g. adding an environment variable) has no effect until someone manually copies the file.
+2. **`systemctl daemon-reload`** — tells systemd to re-read unit files from disk. Without this, systemd continues using its cached version even after files are copied.
+3. **`systemctl restart`** — applies the new configuration to running services immediately.
+4. **`systemctl enable`** — creates the symlinks that make services start on boot. Without this, everything works fine until the server reboots, at which point nothing starts.
+
+**What to enable vs. not enable:**
+
+- **Enable:** long-running services (e.g. `artbots-gui.service`) and timers (e.g. `ubuntu-monitor-collector.timer`)
+- **Do not enable:** oneshot services triggered by timers (e.g. `ubuntu-monitor-collector.service`) — they are activated by their timer, not by boot
+
+**Code example:**
+
+```bash
+phase_services() {
+    print_phase 7 "Services"
+
+    # Copy unit files from repo to systemd
+    cp deployment/*.service /etc/systemd/system/
+    cp deployment/*.timer   /etc/systemd/system/
+
+    # Reload systemd so it picks up any changes
+    systemctl daemon-reload
+
+    # Restart services to apply new code/config
+    systemctl restart my-project-web.service
+    systemctl restart my-project-collector.timer
+
+    # Enable for boot — without this, a reboot kills everything
+    systemctl enable my-project-web.service
+    systemctl enable my-project-collector.timer
+}
+```
+
+> **Gap to fix:** artbots' deploy script was missing `systemctl enable` calls for all three of its services, meaning a server reboot would leave artbots completely down. The enable calls have now been fixed. The script is also missing the unit file copy step (copying from `deployment/` to `/etc/systemd/system/`), tracked as TD-001.
+
 **CLI flags (consistent across all three projects):**
 
 | Flag | Purpose |
