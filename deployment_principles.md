@@ -405,7 +405,49 @@ CPUQuota=<appropriate-limit>
 | 5 | **Dependencies** | `pip install` or `npm ci`, upgrading package managers first |
 | 6 | **Permissions** | `chown -R` to service user, `chmod` for `.env` (600), databases (640), scripts (755) |
 | 7 | **Services** | Stop services, copy unit files from `deployment/` to `/etc/systemd/system/`, `daemon-reload`, start, enable |
-| 8 | **Verification** | Health checks (curl for web services), service status, database integrity, summary |
+| 8 | **Verification** | Health checks (curl for web services), service status, database integrity, deployment summary |
+
+**Phase 8 — Deployment summary:**
+
+**Rule:** On successful completion, the deploy script must print a clearly visible summary block containing all information needed to verify and operate the deployment.
+
+**Rationale:** After a deployment, the operator needs to know at a glance: did it work, what was deployed, what data is safe, and what to do next. A consistent summary block makes this a predictable, scannable artifact rather than scattered log lines.
+
+**Required fields:**
+
+| Field | Purpose |
+|-------|---------|
+| Deployment timestamp | Matches the backup filename; ties backup to this exact run |
+| Commit (before → after) | Confirms what code was deployed |
+| Backup filename | Lets the operator verify the backup exists and use it in `--rollback` |
+| Web interface URL | Immediately confirms the service is reachable |
+| View logs command | Removes friction when the first thing to do is check logs |
+| Rollback command | Immediately available if something looks wrong |
+
+**Format:**
+
+```bash
+echo ""
+echo "============================================================================"
+echo " DEPLOYMENT COMPLETED SUCCESSFULLY"
+echo "============================================================================"
+echo "[INFO] Deployment timestamp: ${TIMESTAMP}"
+echo "[INFO] Commit: ${PREVIOUS_COMMIT} -> ${CURRENT_COMMIT}"
+echo "[INFO] Backup: ${BACKUP_FILENAME}"
+echo "[INFO] Web interface: http://${SERVER_IP}:${PORT}"
+echo "[INFO] View logs: journalctl -u ${WEB_SERVICE} -f"
+echo "[INFO] Rollback: sudo bash ./scripts/deploy.sh --rollback"
+echo ""
+```
+
+- The `===` border must span the full terminal width (80 characters) so the block is visually distinct from phase output
+- Omit `Web interface` for projects without a web service (e.g. fedi-monitor)
+- Include a log command per service if the project has multiple services
+- `PREVIOUS_COMMIT` and `CURRENT_COMMIT` are captured before and after the git pull in Phase 4
+
+**Evidence:** boekwinkeltjes implements this pattern exactly.
+
+---
 
 **Script conventions:**
 
