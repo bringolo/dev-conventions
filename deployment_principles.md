@@ -829,7 +829,7 @@ ExecStart=/usr/bin/node src/gui/server.js
 | File | Purpose |
 |------|---------|
 | `docs/deployment.md` (or `DEPLOYMENT.md`) | Comprehensive step-by-step guide covering initial setup through verification |
-| `docs/DEPLOYMENT_QUICK_REFERENCE.md` | One-page cheat sheet for routine operations (daily ops, common commands) |
+| `docs/deployment_quick_reference.md` | One-page cheat sheet for routine operations (daily ops, common commands) |
 | `deployment/` directory | All systemd unit files (`.service` and `.timer` files) |
 | `scripts/deploy.sh` | Automated deployment script following the 8-phase pattern |
 | `.env.example` | Environment variable template with comments explaining each variable |
