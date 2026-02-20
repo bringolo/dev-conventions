@@ -624,6 +624,15 @@ chmod +x /srv/<project>/scripts/*.sh
 
 This is why scripts are invoked with `sudo bash scripts/deploy.sh` rather than `./scripts/deploy.sh` -- it sidesteps the execute-bit issue entirely.
 
+**Pitfall:** If a shell script is committed from Windows without explicitly setting the executable bit in git, it is stored as mode `100644`. On Linux, the deploy script's `chmod 755` then flips it to `100755` on every run, leaving `git status` showing the file as modified after every clean deployment. Fix by committing the correct mode once:
+
+```bash
+git add --chmod=+x scripts/deploy.sh
+git commit -m "Fixed: mark deploy.sh as executable in git (mode 100755)"
+```
+
+After that, `chmod 755` in the deploy script is a no-op from git's perspective.
+
 **Database files:**
 
 SQLite databases are binary-compatible between Windows and Linux. No conversion needed. Transfer via SCP:
