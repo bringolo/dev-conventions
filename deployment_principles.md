@@ -28,6 +28,7 @@ Cross-project reference documenting the deployment conventions shared by **artbo
 20. [Port Allocation](#20-port-allocation)
 21. [Cross-Project Database Access](#21-cross-project-database-access)
 22. [Tracked Files with Intentional Local Overrides](#22-tracked-files-with-intentional-local-overrides)
+23. [Large-Scale Scraping: Ubuntu Network Tuning](#23-large-scale-scraping-ubuntu-network-tuning) *(includes IPv6 routing check)*
 
 ---
 
@@ -695,6 +696,8 @@ aiodns>=3.0.0
 
 **Evidence:** Feb 2026 investigation. With 80 concurrent requests, Ubuntu's health checker recovered only 17,437/27,510 servers (63%) at 10.38 srv/s with 9,892 timeout errors. Windows recovered 26,068/27,510 (95%) at 23.58 srv/s. The difference (8,631 servers) matched the timeout error count almost exactly. Reducing concurrency to 40 and adding `aiodns` eliminates the DNS thread pool as a bottleneck on both platforms.
 
+> **See also:** Section 23 — Large-Scale Scraping: Ubuntu Network Tuning for additional system-level fixes (file descriptor limits, TCP port range, aiohttp timeout split) that further close the Ubuntu/Windows performance gap.
+
 ---
 
 ## 13. Firewall Configuration
@@ -1090,6 +1093,220 @@ git ls-files -v | grep '^h'
 - If multiple files need overrides -> consider whether the config model needs restructuring (e.g., a `config/local.json` overlay pattern)
 
 > **Alternative considered:** `.git/info/exclude` (a local-only gitignore). This does not work for files already tracked by git -- it only prevents untracked files from appearing in `git status`. For tracked files with local overrides, `--assume-unchanged` is the correct tool.
+
+---
+
+## 23. Large-Scale Scraping: Ubuntu Network Tuning
+
+**When to apply:** Any project that makes more than ~1,000 outbound HTTP connections per pipeline run on Ubuntu.
+
+**Context:** Ubuntu's default kernel and system limits are tuned for general-purpose use, not for processes making tens of thousands of short-lived outbound TCP connections. On Windows, the defaults are more generous for outbound scenarios. Without tuning, Ubuntu scraping jobs produce significantly more timeouts than identical Windows runs — not due to network conditions, but due to resource exhaustion.
+
+---
+
+### 23.1 File descriptor limits (primary fix)
+
+**Rule:** Raise the open-files limit to 65535 before deploying any high-volume scraper on Ubuntu.
+
+**Rationale:** Ubuntu defaults to 1024 open files per process. Each TCP socket uses one file descriptor. At 40+ concurrent connections plus database handles and log files, this limit is hit almost immediately. New connections then stall and surface as timeout errors. Raising the limit to 65535 eliminates this class of failure entirely.
+
+**System-level fix (`/etc/security/limits.conf`):**
+
+```
+*    soft    nofile    65535
+*    hard    nofile    65535
+```
+
+Also raise the kernel-wide limit in `/etc/sysctl.conf`:
+
+```ini
+fs.file-max = 200000
+```
+
+> **Critical:** `limits.conf` changes only take effect after log out and back in (or reboot). They do NOT apply to the current shell session.
+
+**systemd override (mandatory):**
+
+systemd ignores `limits.conf` for services it launches. Always add `LimitNOFILE=65535` to the `[Service]` section of any service unit that runs a scraper:
+
+```ini
+[Service]
+LimitNOFILE=65535
+```
+
+Without this, the service user gets the default 1024 limit regardless of `limits.conf`. This is the most commonly missed step.
+
+---
+
+### 23.2 aiohttp timeout split (code-level fix)
+
+**Rule:** Never use `aiohttp.ClientTimeout(total=N)` alone for large-scale scraping. Always split into component timeouts.
+
+**Rationale:** The `total` timeout starts when `session.get()` is called. If DNS or connection setup consumes time, the remaining budget for the HTTP response shrinks accordingly. With many queued requests, the `total` window can expire before the TCP handshake completes — producing "false" timeouts on servers that would have responded correctly.
+
+**Anti-pattern:**
+
+```python
+timeout = aiohttp.ClientTimeout(total=10)
+```
+
+**Correct pattern:**
+
+```python
+timeout = aiohttp.ClientTimeout(
+    total=10,
+    connect=8,        # cap time to establish connection
+    sock_connect=8,   # cap time for socket connect phase
+    sock_read=8,      # cap time for response data
+)
+```
+
+Setting `connect`, `sock_connect`, and `sock_read` to `total - 2` gives explicit budgets for each phase while keeping `total` as the hard ceiling.
+
+> **Warning:** Explicit `sock_connect` makes broken IPv6 routing catastrophic. If the server has no IPv6 routing, `sock_connect=8` will be consumed entirely by a hanging IPv6 attempt with no time left for IPv4 fallback. Always verify IPv6 routing (§23.5) before applying this pattern.
+
+---
+
+### 23.3 aiodns (mandatory for Linux async DNS at scale)
+
+**Rule:** Include `aiodns` in `requirements.txt` for any Python project using `aiohttp` on Linux.
+
+**Rationale:** Without `aiodns`, Python's `asyncio.getaddrinfo()` delegates DNS to a blocking thread pool (~8 workers by default). Under high concurrency, DNS lookups queue behind each other and consume the request timeout budget before the HTTP connection starts. `aiodns` uses the c-ares library for fully asynchronous DNS, eliminating the thread pool bottleneck.
+
+**`requirements.txt`:**
+
+```
+aiodns>=3.0.0
+```
+
+**Code (`aiohttp.TCPConnector`):**
+
+```python
+connector = aiohttp.TCPConnector(
+    resolver=aiohttp.AsyncResolver(),  # c-ares async DNS
+)
+```
+
+aiohttp automatically detects and uses aiodns when `AsyncResolver()` is specified. Confirm installation after `pip install -r requirements.txt`:
+
+```bash
+python -c "import aiodns; print('aiodns OK')"
+```
+
+---
+
+### 23.4 TCP port range and TIME_WAIT (secondary fix)
+
+**Rule:** Expand the ephemeral port range and enable TIME_WAIT socket reuse on servers making >10K outbound connections per run.
+
+**Rationale:** Ubuntu's default ephemeral port range is 32768-60999 (~28K ports). Each closed TCP connection holds its port in TIME_WAIT for 60 seconds by default. At high volume, this can exhaust available ports, causing `connect()` to fail.
+
+**`/etc/sysctl.d/99-scraper-tuning.conf`:**
+
+```ini
+net.ipv4.ip_local_port_range = 1024 65535
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 15
+net.ipv4.tcp_max_tw_buckets = 1048576
+```
+
+---
+
+### 23.5 IPv6 routing: verify before deploying any outbound scraper
+
+**Rule:** On every new server, verify IPv6 routing before deploying a scraper. If IPv6 is not routable, force IPv4-only in the `TCPConnector`.
+
+**Rationale:** Ubuntu servers on consumer or hosting ISPs frequently have IPv6 addresses configured at the OS level but no actual IPv6 routing upstream. `socket.getaddrinfo()` (and c-ares) will return both AAAA and A records for most fediverse servers. aiohttp then attempts IPv6 first. If the IPv6 connection silently black-holes (no RST, no ICMP unreachable — just no response), it hangs until `sock_connect` expires. This consumes the entire connection budget and the IPv4 fallback never runs. The result is thousands of timeout failures on servers that are perfectly reachable via IPv4.
+
+**This is distinct from the FD limit problem** — the server can have a 65535 FD limit and aiodns installed and still produce mass timeouts if IPv6 routing is broken and `sock_connect` is set explicitly.
+
+**Verification (run on every new server before first scraping run):**
+
+```bash
+curl -6 --max-time 5 https://mastodon.social
+```
+
+| Result | Meaning |
+|--------|---------|
+| HTTP 200 response | IPv6 routing works — no action needed |
+| `Failed to connect ... after <10ms: Couldn't connect to server` | No IPv6 routing — apply fix below |
+| Hangs for 5 seconds then times out | IPv6 black-hole routing — apply fix below (most dangerous case) |
+
+**Fix — force IPv4 in `TCPConnector`:**
+
+```python
+import socket
+
+connector = aiohttp.TCPConnector(
+    ...
+    family=socket.AF_INET,  # IPv4 only — server has no IPv6 routing
+)
+```
+
+`family=socket.AF_INET` has two effects:
+1. Tells aiohttp to only request A records from the resolver (no AAAA queries)
+2. Prevents any IPv6 connection attempts regardless of what DNS returns
+
+This is safe on servers with working IPv6 too — if you later gain IPv6 routing, remove the parameter rather than having the code silently ignore available addresses.
+
+**Interaction with `sock_connect` timeout (§23.2):**
+
+The `sock_connect=N` timeout makes this bug particularly destructive. Without an explicit `sock_connect`, a black-holed IPv6 attempt eventually yields to IPv4 within the `total` budget. With `sock_connect=8`, the 8-second budget is fully consumed by the hanging IPv6 attempt and the IPv4 fallback never executes.
+
+**Evidence:** Feb 2026, fedi-monitor on hofnetserver. After adding `sock_connect=8` (§23.2 fix), Linux timeouts jumped from 7,173 to 25,423 on identical server sets. `curl -6` confirmed no IPv6 routing. Adding `family=socket.AF_INET` resolved the regression.
+
+---
+
+### 23.6 What NOT to do
+
+| Setting | Why to skip |
+|---------|-------------|
+| `net.core.somaxconn` | Controls the incoming connection backlog on a *server accepting* connections. Zero effect for outbound client connections. |
+| `net.ipv4.tcp_max_syn_backlog` | Same — server-side incoming queue. Irrelevant for outbound clients. |
+| TCP buffer sizes (`rmem_max`, `wmem_max`, etc.) | Primarily benefit high-throughput long-lived connections (e.g., file transfers). Marginal improvement for thousands of short HTTP health checks. |
+| BBR congestion control | Optimizes bandwidth estimation for long-lived streams. Negligible impact on short health-check requests. |
+| `chattr +i /etc/resolv.conf` | Permanently immutably locks the file. Breaks system updates, NetworkManager, and any future DNS reconfiguration. Never do this. |
+| Increasing concurrency to 300+ | Causes fediverse servers to rate-limit or block the scraper. Conservative concurrency (40) is intentional. |
+
+---
+
+### 23.7 Startup FD limit check (code-level defense)
+
+**Rule:** Add a startup check in any long-running scraper that warns when the FD limit is below the safe threshold.
+
+**Rationale:** Silent FD limit failures are hard to diagnose. A startup warning in the application log makes the problem immediately visible without requiring sysadmin access.
+
+**Python pattern:**
+
+```python
+import platform
+
+if platform.system() == "Linux":
+    try:
+        import resource
+        soft_limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft_limit < 4096:
+            logger.warning(
+                f"File descriptor soft limit is {soft_limit} — run 'ulimit -n 65535' "
+                f"or apply limits.conf and add LimitNOFILE=65535 to the systemd unit file."
+            )
+    except Exception:
+        pass
+```
+
+This is safe to include on Windows (the `platform.system()` guard prevents the Linux-only `resource` module from being imported).
+
+---
+
+**Evidence:** Feb 2026 comparison of fedi-monitor health scraper across 32,230 servers.
+
+| Date | Ubuntu timeouts | Windows timeouts | Ubuntu run time | Root cause |
+|------|----------------|-----------------|-----------------|-----------|
+| Feb 23 | 7,173 (22.2%) | 288 (0.9%) | ~58 min | FD limits + no `sock_connect` split |
+| Feb 24 (after §23.1–23.3 fixes) | 25,423 (79.2%) | 359 (1.1%) | 22 min | IPv6 black-hole + `sock_connect=8` interaction (§23.5) |
+| Feb 24 (after `family=AF_INET`) | ~expected <2% | ~1% | ~15 min | — |
+
+Feb 24 regression confirmed that `sock_connect=8` combined with broken IPv6 routing is more destructive than the original FD limit problem. `curl -6 --max-time 5 https://mastodon.social` on hofnetserver returned an immediate failure confirming no IPv6 routing. Fix: `family=socket.AF_INET` on `TCPConnector`.
 
 ---
 
