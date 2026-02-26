@@ -8,27 +8,28 @@ Cross-project reference documenting the deployment conventions shared by **artbo
 
 1. [Directory Structure Convention](#1-directory-structure-convention)
 2. [Service User Model](#2-service-user-model)
-3. [Git Operations](#3-git-operations)
-4. [File Permissions Model](#4-file-permissions-model)
-5. [Environment Configuration](#5-environment-configuration)
-6. [Python Virtual Environment](#6-python-virtual-environment)
-7. [Node.js Dependencies](#7-nodejs-dependencies)
-8. [Systemd Service Configuration](#8-systemd-service-configuration)
-9. [Systemd Security Hardening](#9-systemd-security-hardening)
-10. [Deploy Script Architecture](#10-deploy-script-architecture)
-11. [Database Backup Strategy](#11-database-backup-strategy)
-12. [Cross-Platform Considerations](#12-cross-platform-considerations)
-13. [Firewall Configuration](#13-firewall-configuration)
-14. [Logging and Monitoring](#14-logging-and-monitoring)
-15. [Web Server Pattern](#15-web-server-pattern)
-16. [Deployment Documentation Convention](#16-deployment-documentation-convention)
-17. [Update Workflow](#17-update-workflow)
-18. [Rollback Strategy](#18-rollback-strategy)
-19. [Service Naming Convention](#19-service-naming-convention)
-20. [Port Allocation](#20-port-allocation)
-21. [Cross-Project Database Access](#21-cross-project-database-access)
-22. [Tracked Files with Intentional Local Overrides](#22-tracked-files-with-intentional-local-overrides)
-23. [Large-Scale Scraping: Ubuntu Network Tuning](#23-large-scale-scraping-ubuntu-network-tuning) *(includes IPv6 routing check)*
+3. [GitHub Deploy User (SSH Authentication)](#3-github-deploy-user-ssh-authentication)
+4. [Git Operations](#4-git-operations)
+5. [File Permissions Model](#5-file-permissions-model)
+6. [Environment Configuration](#6-environment-configuration)
+7. [Python Virtual Environment](#7-python-virtual-environment)
+8. [Node.js Dependencies](#8-nodejs-dependencies)
+9. [Systemd Service Configuration](#9-systemd-service-configuration)
+10. [Systemd Security Hardening](#10-systemd-security-hardening)
+11. [Deploy Script Architecture](#11-deploy-script-architecture)
+12. [Database Backup Strategy](#12-database-backup-strategy)
+13. [Cross-Platform Considerations](#13-cross-platform-considerations)
+14. [Firewall Configuration](#14-firewall-configuration)
+15. [Logging and Monitoring](#15-logging-and-monitoring)
+16. [Web Server Pattern](#16-web-server-pattern)
+17. [Deployment Documentation Convention](#17-deployment-documentation-convention)
+18. [Update Workflow](#18-update-workflow)
+19. [Rollback Strategy](#19-rollback-strategy)
+20. [Service Naming Convention](#20-service-naming-convention)
+21. [Port Allocation](#21-port-allocation)
+22. [Cross-Project Database Access](#22-cross-project-database-access)
+23. [Tracked Files with Intentional Local Overrides](#23-tracked-files-with-intentional-local-overrides)
+24. [Large-Scale Scraping: Ubuntu Network Tuning](#24-large-scale-scraping-ubuntu-network-tuning) *(includes IPv6 routing check)*
 
 ---
 
@@ -94,9 +95,26 @@ sudo useradd --system --no-create-home --shell /usr/sbin/nologin <username>
 
 ---
 
-## 3. Git Operations
+## 3. GitHub Deploy User (SSH Authentication)
 
-**Rule:** Always use SSH remotes, never HTTPS. Git operations are performed as root (or via sudo), never as the service user. After every pull, ownership is fixed.
+**Rule:** All GitHub authentication on the server uses a dedicated GitHub machine user (`hofnet-deploy-bot`), never a personal account SSH key or per-repo deploy keys. The machine user is added as a **Read** collaborator on each repo the server needs to access. Its SSH keypair lives at `/root/.ssh/hofnet_machine_key`.
+
+**Rationale:** A personal SSH key on the server grants access to every repo the personal account can reach — a large blast radius if the server is compromised. A dedicated machine user limits access to explicitly listed repos, is independent of personal account credential changes, and requires only one SSH keypair for all repos rather than one per repo.
+
+**First-time server setup:** See `deploy_user_setup.md`.
+
+### Adding a new repo
+
+1. Add `hofnet-deploy-bot` as a **Read** collaborator on the GitHub repo.
+2. Clone with `git@github.com:Owner/repo.git` — no further key setup needed.
+
+**Evidence:** All server repos are accessed via `hofnet-deploy-bot`. Key stored at `/root/.ssh/hofnet_machine_key`.
+
+---
+
+## 4. Git Operations
+
+**Rule:** Always use SSH remotes (never HTTPS); authentication is handled by the deploy user SSH key (Section 3). Git operations are performed as root (or via sudo), never as the service user. After every pull, ownership is fixed.
 
 **Rationale:** SSH avoids credential prompts and token expiry. The service user has no SSH keys (by design), so Git operations must be done by a user that does. Fixing ownership after pull is mandatory because git pull creates files owned by whoever ran it.
 
@@ -146,7 +164,7 @@ sudo chown -R <user>:<user> /srv/<project>
 
 ---
 
-## 4. File Permissions Model
+## 5. File Permissions Model
 
 **Rule:** Permissions follow a strict hierarchy. Secrets are locked down to owner-only. No world-writable files exist anywhere.
 
@@ -164,7 +182,7 @@ sudo chown -R <user>:<user> /srv/<project>
 
 ---
 
-## 5. Environment Configuration
+## 6. Environment Configuration
 
 **Rule:** Runtime configuration and secrets live in a `.env` file at the project root, loaded by systemd's `EnvironmentFile=` directive. A `.env.example` is committed to the repo as a template; the real `.env` is never committed.
 
@@ -200,7 +218,7 @@ python3 -c "import secrets; print(secrets.token_hex(32))"
 
 ---
 
-## 6. Python Virtual Environment
+## 7. Python Virtual Environment
 
 *Applies to: Python projects (fedi-monitor, boekwinkeltjes-scraper, fedi-dashboard)*
 
@@ -235,7 +253,7 @@ ExecStart=/srv/<project>/venv/bin/gunicorn --bind 0.0.0.0:8005 wsgi:app
 
 ---
 
-## 7. Node.js Dependencies
+## 8. Node.js Dependencies
 
 *Applies to: Node.js projects (artbots)*
 
@@ -255,7 +273,7 @@ sudo -u artbots env HOME=/srv/artbots npm ci --omit=dev --cache /tmp/npm-cache-a
 
 ---
 
-## 8. Systemd Service Configuration
+## 9. Systemd Service Configuration
 
 **Rule:** Service files are version-controlled in the `deployment/` directory and copied to `/etc/systemd/system/` during deployment. After copying, run `systemctl daemon-reload`.
 
@@ -324,7 +342,7 @@ WantedBy=timers.target       # Timers use timers.target, NOT multi-user.target
 
 ---
 
-## 9. Systemd Security Hardening
+## 10. Systemd Security Hardening
 
 **Rule:** Every service file includes a mandatory security hardening block. No exceptions.
 
@@ -389,7 +407,7 @@ CPUQuota=<appropriate-limit>
 
 ---
 
-## 10. Deploy Script Architecture
+## 11. Deploy Script Architecture
 
 **Rule:** Every project ships a `scripts/deploy.sh` that follows an 8-phase pattern with consistent CLI flags and error codes.
 
@@ -530,7 +548,7 @@ phase_services() {
 
 ---
 
-## 11. Database Backup Strategy
+## 12. Database Backup Strategy
 
 **Rule:** Database backups are timestamped, integrity-verified, and automatically rotated. A backup always runs before any deployment.
 
@@ -560,7 +578,7 @@ phase_services() {
 
 ---
 
-## 12. Cross-Platform Considerations
+## 13. Cross-Platform Considerations
 
 **Rule:** All development happens on Windows; all deployment happens on Linux. Handle the differences explicitly.
 
@@ -700,7 +718,7 @@ aiodns>=3.0.0
 
 ---
 
-## 13. Firewall Configuration
+## 14. Firewall Configuration
 
 **Rule:** Use UFW with default-deny incoming. Always allow SSH first. Only open ports that the project actually needs.
 
@@ -727,7 +745,7 @@ sudo ufw allow ssh           # ALWAYS first -- prevents lockout
 
 ---
 
-## 14. Logging and Monitoring
+## 15. Logging and Monitoring
 
 **Rule:** Use systemd journal as the primary log aggregator. Application logs go to the project's `logs/` directory as a secondary source.
 
@@ -775,7 +793,7 @@ du -sh /srv/<project>/data/backups/
 
 ---
 
-## 15. Web Server Pattern
+## 16. Web Server Pattern
 
 *Applies to: Projects with web interfaces (artbots, boekwinkeltjes-scraper, fedi-dashboard)*
 
@@ -830,7 +848,7 @@ ExecStart=/usr/bin/node src/gui/server.js
 
 ---
 
-## 16. Deployment Documentation Convention
+## 17. Deployment Documentation Convention
 
 **Rule:** Every project ships with a complete set of deployment documentation and automation.
 
@@ -878,7 +896,7 @@ Every `docs/deployment.md` must be organized into two clearly separated main sec
 
 ---
 
-## 17. Update Workflow
+## 18. Update Workflow
 
 **Rule:** Routine updates follow a push-then-deploy pattern. When the deploy script itself has changed, pull manually first.
 
@@ -903,7 +921,7 @@ sudo bash scripts/deploy.sh
 
 ---
 
-## 18. Rollback Strategy
+## 19. Rollback Strategy
 
 **Rule:** Rollback restores the latest database backup and resets Git to the previous state. Always test with `--dry-run` or `--check` before a full deployment.
 
@@ -937,7 +955,7 @@ sudo bash scripts/deploy.sh --check
 
 ---
 
-## 19. Service Naming Convention
+## 20. Service Naming Convention
 
 **Rule:** Service and timer files follow the pattern `<project>-<component>.service` (or `.timer`). Template services use `<project>@.service` with `%i` for instance names.
 
@@ -961,7 +979,7 @@ sudo bash scripts/deploy.sh --check
 
 ---
 
-## 20. Port Allocation
+## 21. Port Allocation
 
 **Rule:** Each project with a web interface gets a unique port in the 8000+ range. Ports are tracked in this document to prevent collisions.
 
@@ -978,7 +996,7 @@ sudo bash scripts/deploy.sh --check
 
 ---
 
-## 21. Cross-Project Database Access
+## 22. Cross-Project Database Access
 
 *Applies to: fedi-dashboard (reads fedi-monitor's database)*
 
@@ -1032,7 +1050,7 @@ conn = sqlite3.connect(f"file:{db_path}?immutable=1", uri=True)
 
 ---
 
-## 22. Tracked Files with Intentional Local Overrides
+## 23. Tracked Files with Intentional Local Overrides
 
 **Rule:** When a tracked file must have different content on the server than in the repository, use `git update-index --assume-unchanged <file>` to suppress it from `git status`. Apply this in the deploy script after every `git pull`.
 
@@ -1096,7 +1114,7 @@ git ls-files -v | grep '^h'
 
 ---
 
-## 23. Large-Scale Scraping: Ubuntu Network Tuning
+## 24. Large-Scale Scraping: Ubuntu Network Tuning
 
 **When to apply:** Any project that makes more than ~1,000 outbound HTTP connections per pipeline run on Ubuntu.
 

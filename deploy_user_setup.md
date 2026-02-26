@@ -52,7 +52,7 @@ Use a single deploy user when:
 | **Server** | Ubuntu (hofnet-server) |
 | **Deploy GitHub account** | A dedicated deployment account (`hofnet-deploy-bot`) |
 | **Server user running deploys** | `root` (via deploy script) or service users |
-| **Key storage** | `/root/.sshs/` | (files: `hofnet_machine_key` and `hofnet_machine_key.pub`)
+| **Key storage** | `/root/.ssh/` (files: `hofnet_machine_key` and `hofnet_machine_key.pub`) |
 | **Repos to deploy** | `Wisdom-Chicken/adagium` and `Bringolo/Artbots` (more wiil be added) |
 
 ---
@@ -73,9 +73,6 @@ Use a single deploy user when:
 Generate a single Ed25519 keypair for the deploy user.
 
 ```bash
-# Create the directory
-sudo mkdir -p /etc/deploy-keys
-
 # Generate the keypair
 sudo ssh-keygen -t ed25519 -C "hofnet-deploy-bot" -f /root/.ssh/hofnet_machine_key -N ""
 
@@ -122,6 +119,7 @@ For each repo the server needs to pull:
 | GitHub repo | Role |
 |---|---|
 | `Wisdom-Chicken/adagium` | Read |
+| `Bringolo/Artbots` | Read |
 
 Add more rows as you deploy more apps.
 
@@ -135,7 +133,7 @@ Edit `/root/.ssh/config` (or the SSH config for whichever user runs deploys):
 Host github.com
     HostName github.com
     User git
-    IdentityFile /etc/deploy-keys/hofnet-deploy
+    IdentityFile /root/.ssh/hofnet_machine_key
     IdentitiesOnly yes
 ```
 
@@ -178,7 +176,7 @@ cd /srv/adagium && git remote set-url origin git@github.com:Wisdom-Chicken/adagi
 Test that the deploy key authenticates correctly:
 
 ```bash
-sudo ssh -T -i /etc/deploy-keys/hofnet-deploy-bot git@github.com
+sudo ssh -T -i /root/.ssh/hofnet_machine_key git@github.com
 # Expected: Hi hofnet-deploy-bot! You've successfully authenticated, but GitHub does not provide shell access.
 ```
 
@@ -204,7 +202,7 @@ The key selection happens transparently via the SSH config.
 
 When you deploy a new repo on the server:
 
-1. Add `hofnet-deploy-net` as a **Read** collaborator on the new GitHub repo.
+1. Add `hofnet-deploy-bot` as a **Read** collaborator on the new GitHub repo.
 2. Clone or set the remote to `git@github.com:Owner/repo.git`.
 3. Done. The same SSH key works automatically.
 
