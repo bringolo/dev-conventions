@@ -105,7 +105,7 @@ sudo useradd --system --no-create-home --shell /usr/sbin/nologin <username>
 
 ### Adding a new repo
 
-1. Add `hofnet-deploy-bot` as a **Read** collaborator on the GitHub repo.
+1. Add `hofnet-deploy-bot` as a **Read** collaborator on the GitHub repo (don not give this user write privilege!!).
 2. Clone with `git@github.com:Owner/repo.git` — no further key setup needed.
 
 **Evidence:** All server repos are accessed via `hofnet-deploy-bot`. Key stored at `/root/.ssh/hofnet_machine_key`.
@@ -886,13 +886,31 @@ Every `docs/deployment.md` must be organized into two clearly separated main sec
 6. Systemd service and timer installation
 7. Firewall configuration
 8. Verification and health checks
-9. Troubleshooting
 
-**Rationale:** Routine updates are the most common operation. Putting them first means the reader finds what they need immediately. First-time installation is a one-time event and can be longer and more detailed.
+**C. Troubleshooting** (standalone section, not a sub-section of installation)
+
+Every `docs/deployment.md` must include a dedicated Troubleshooting section covering at minimum:
+
+1. **Service fails to start** — `systemctl status <service>` and `journalctl -u <service> -n 50`, plus the most common causes for that project
+2. **Permission errors** — `chown -R <user>:<user> /srv/<project>`, `chmod 600 .env`, and a verification command
+3. **Web interface not responding** — port check (`ss -tlnp | grep <port>`), service restart, `ufw status`
+4. **Line ending issues** — `dos2unix` fix for scripts and service files (applies to all Windows-developed projects)
+5. **Git pull blocked by local changes** — all three resolution options (reset, checkout, stash) with ✅/❌ safety labels on when to use `git reset --hard origin/main`
+6. **Project-specific issues** — e.g. database locked/access denied, timer not firing, cross-service permission issues
+
+**Rationale:** Routine updates are the most common operation. Putting them first means the reader finds what they need immediately. First-time installation is a one-time event and can be longer and more detailed. These six troubleshooting categories cover the failure modes that actually occur across the project fleet — standardising them ensures any operator can diagnose a problem on an unfamiliar project using the same mental model.
 
 **Evidence:** artbots, fedi-monitor, and boekwinkeltjes-scraper all include these files. boekwinkeltjes has the most comprehensive documentation with 5 separate deployment-related markdown files.
 
 > **Gap to fix:** boekwinkeltjes' `docs/deployment.md` still references `git push origin master` and `git pull origin master` in the "Deploying Code Fixes" section (Method B). These should be changed to `main`.
+
+**Verification checklist when rewriting deployment docs:**
+
+When updating a project's `docs/deployment.md` to match these conventions, verify the following after the rewrite:
+
+1. **1:1 step mapping** — every old installation step that contained concrete commands must map to a new step with concrete commands, even if the commands changed completely. No step should silently disappear during restructuring.
+2. **Cross-reference shared setup; inline project-specific setup** — when a step involves shared server setup documented elsewhere (e.g., `deploy_user_setup.md`), cross-reference the shared guide and include only the project-specific actions plus a verification command. Do NOT duplicate the shared guide inline (bloat), but also do NOT omit the step entirely (the previous failure mode). The step must still exist with a clear cross-reference and at least a verification command.
+3. **Post-rewrite step count audit** — count the installation steps before and after the rewrite. If a step disappeared, confirm it was intentionally merged into another step (not dropped). Pay special attention to steps that changed topic (e.g., an SSH setup step becoming a directory setup step means the SSH setup was lost).
 
 ---
 
