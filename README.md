@@ -1,6 +1,6 @@
 # dev-conventions
 
-Cross-project development and deployment conventions shared by **artbots**, **fedi-monitor**, **boekwinkeltjes-scraper**, and **fedi-dashboard**.
+Cross-project development and deployment conventions shared by **artbots**, **fedi-monitor**, **boekwinkeltjes-scraper**, **fedi-dashboard**, **pinax**, **ubuntu-monitor**, and **exlibris**.
 
 This is a documentation-only repository that defines how code is written, structured, configured, tested, and deployed across all projects in the bringolo ecosystem.
 
@@ -16,7 +16,7 @@ This is a documentation-only repository that defines how code is written, struct
 | File | Purpose |
 |------|---------|
 | `development_principles.md` | 17 conventions covering how code is written, structured, and tested |
-| `deployment_principles.md` | 22 conventions covering how code reaches the server |
+| `deployment_principles.md` | 25 conventions covering how code reaches the server |
 | `development_audit.md` | Per-project compliance tracking with gap analysis |
 | `claude_template.md` | Template for creating `CLAUDE.md` in new projects |
 | `CLAUDE.md` | Guidance for Claude Code AI assistant when working in this repo |
@@ -29,6 +29,9 @@ This is a documentation-only repository that defines how code is written, struct
 | [artbots](https://github.com/bringolo/artbots) | Node.js | Automated art posting bots for Mastodon and Bluesky |
 | [boekwinkeltjes-scraper](https://github.com/bringolo/boekwinkeltjes-scraper) | Python | Dutch second-hand bookshop scraper with web dashboard |
 | [fedi-dashboard](https://github.com/bringolo/fedi-dashboard) | Python | Web dashboard visualizing fedi-monitor data |
+| [pinax](https://github.com/bringolo/pinax) | Python + Firefox extension | Auction lot catalogue: captures Firefox bookmarks and scrapes each bookmarked lot |
+| [ubuntu-monitor](https://github.com/bringolo/ubuntu-monitor) | Python | Web dashboard for health and resource usage of the shared Ubuntu server |
+| [exlibris](https://github.com/bringolo/exlibris) | Python | EXLIBRIS-L mailing list digest: daily discussion digest + weekly commercial roundup |
 
 ## Key Conventions
 

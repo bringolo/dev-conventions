@@ -30,6 +30,7 @@ Cross-project reference documenting the deployment conventions shared by **artbo
 22. [Cross-Project Database Access](#22-cross-project-database-access)
 23. [Tracked Files with Intentional Local Overrides](#23-tracked-files-with-intentional-local-overrides)
 24. [Large-Scale Scraping: Ubuntu Network Tuning](#24-large-scale-scraping-ubuntu-network-tuning) *(includes IPv6 routing check)*
+25. [Deploy Scripts Must Not Dirty the Checkout](#25-deploy-scripts-must-not-dirty-the-checkout)
 
 ---
 
@@ -124,18 +125,6 @@ sudo useradd --system --no-create-home --shell /usr/sbin/nologin <username>
 git@github.com:bringolo/<repo>.git
 ```
 
-**Safe directory configuration** (required because the repo is owned by the service user, not root):
-
-```bash
-# As root (for sudo git operations)
-sudo git config --global --add safe.directory /srv/<project>
-
-# As the human user jahof (for non-sudo git operations)
-git config --global --add safe.directory /srv/<project>
-```
-
-This must be set for both root and the human user (jahof).
-
 **Initial clone workflow:**
 
 ```bash
@@ -143,7 +132,19 @@ sudo git clone git@github.com:bringolo/<repo>.git /srv/<project>
 cd /srv/<project>
 sudo git checkout main    # Verify correct branch -- clone may default to develop
 sudo chown -R <user>:<user> /srv/<project>
+
+# Mandatory, and it belongs on THIS line -- the chown above is what creates the need.
+sudo git config --global --add safe.directory /srv/<project>   # for root / sudo git
+git config --global --add safe.directory /srv/<project>        # for the human user jahof
 ```
+
+**Safe directory configuration** is not optional and must be set for **both** root and the human user (jahof). The `chown` hands the working tree to the service user, but `deploy.sh` runs git as root, and git refuses to operate on a repository owned by someone else. Skip it and every deploy dies in the git phase with:
+
+```
+fatal: detected dubious ownership in repository at '/srv/<project>'
+```
+
+> **The `sudo` is load-bearing.** `git config --global` writes to the *invoking user's* `~/.gitconfig`. Running the command without `sudo` writes to `/home/jahof/.gitconfig`, which root never reads — the command appears to succeed and changes nothing, and the next `sudo bash scripts/deploy.sh` fails with the identical message. Both lines above are needed because both users run git against this repo.
 
 > **Note:** All projects use `main` as the default branch. Always verify the branch name after initial clone, especially if the repo was created before GitHub's default branch rename from `master` to `main`.
 
@@ -151,14 +152,18 @@ sudo chown -R <user>:<user> /srv/<project>
 
 ```bash
 cd /srv/<project>
-sudo git fetch origin main
-sudo git pull origin main
+sudo git fetch origin
+sudo git reset --hard origin/main
 sudo chown -R <user>:<user> /srv/<project>
 ```
 
+`fetch` + `reset --hard` rather than `git pull`: production must match the remote exactly (see the troubleshooting note below), and `reset` is immune to the local drift that makes `pull` abort. This is also what deploy scripts do in their git phase, so the manual and scripted paths behave identically. It is destructive by design — it discards local changes, which is correct on a production server. Check `sudo git status` first if you suspect real local work.
+
 > **Common pitfall:** Never attempt git operations as the service user, even with a fallback to root. The service user has no SSH keys by design and git will fail silently or with confusing errors. Always run git as root (via `sudo`) or as the human user. This was learned the hard way when boekwinkeltjes' deploy script originally tried `sudo -u $SERVICE_USER git fetch` with a root fallback -- the correct fix was to remove the service-user attempt entirely.
 
-> **Troubleshooting:** If `git pull` fails with "local changes would be overwritten by merge", use `sudo git reset --hard origin/main` on the production server. Production servers should always match the remote exactly. Always check `sudo git status` and `sudo git diff` before resetting to verify no important uncommitted changes exist.
+> **Troubleshooting:** If `git pull` fails with "local changes would be overwritten by merge", use `sudo git fetch origin` + `sudo git reset --hard origin/main` on the production server. Production servers should always match the remote exactly. Always check `sudo git status` and `sudo git diff` before resetting to verify no important uncommitted changes exist.
+>
+> **Sub-case — a mode-only diff.** If `sudo git diff <file>` is **empty** but `sudo git diff --summary <file>` prints `mode change 100644 => 100755`, the only difference is the file-permission bit. No content is at risk; discard it with `sudo git checkout -- <file>` rather than reaching for `reset --hard`. This is almost always a deploy script chmod'ing a file that was committed non-executable — fix the cause, not the symptom: see §25.
 
 **Evidence:** All three projects use SSH remotes and follow this ownership-fix pattern in their `deploy.sh` scripts. The safe.directory configuration is set during initial server setup and persists globally.
 
@@ -177,6 +182,8 @@ sudo chown -R <user>:<user> /srv/<project>
 | Data directories | `750` | Owner full, group read/execute |
 | Project root | `755` | World-readable (code is public anyway) |
 | Scripts (`.sh`) | `755` | Executable by all (guarded by sudo in practice) |
+
+> **`.sh` files must ALSO be committed as mode `100755`.** The deploy script's permissions phase sets 755 on disk; if git has the file as `100644`, that chmod flips a *tracked* mode bit and leaves the working tree dirty after every clean deploy — blocking the next pull with a zero-byte content diff. Commit the mode once with `git add --chmod=+x <file>`. See §25.
 
 **Evidence:** All three deploy scripts enforce these permissions in their "Permissions" phase. The `.env` file permission (600) is treated as a security-critical check -- deploy scripts warn if it is more permissive.
 
@@ -207,6 +214,38 @@ SECRET_KEY=actual-secret-value-here
 ```bash
 python3 -c "import secrets; print(secrets.token_hex(32))"
 ```
+
+**Pitfall: NO inline comments in `.env` or `.env.example`.**
+
+Comments go on their own line, above the setting. Never after a value:
+
+```ini
+# WRONG -- systemd reads the value as "imap                # imap | gmail"
+MAIL_SOURCE=imap                # imap | gmail
+
+# RIGHT
+# Valid values: imap | gmail
+MAIL_SOURCE=imap
+```
+
+systemd's `EnvironmentFile=` honours `#` only at the **start of a line**. Everything after the `=` becomes the value, comment included.
+
+What makes this genuinely dangerous is the asymmetry with `python-dotenv`, which most projects also use:
+
+| Loader | Inline comment | Overrides an already-set var? |
+|--------|----------------|-------------------------------|
+| systemd `EnvironmentFile=` | kept as part of the value | n/a -- sets it first |
+| `python-dotenv` `load_dotenv()` | stripped | **No** (`override=False` by default) |
+
+So a manual `python run.py <cmd>` parses the file with dotenv, strips the comment, and **succeeds** — while the systemd service, whose polluted variable dotenv then declines to overwrite, **fails**. The failure is production-only and cannot be reproduced from the command line, which is exactly the profile that costs a debugging session.
+
+Audit an existing `.env` (any line printed is polluted):
+
+```bash
+grep -nE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=.*[^[:space:]][[:space:]]+#' .env
+```
+
+**Required:** deploy scripts must run this check in their pre-flight phase and refuse to deploy on a match (§11, Phase 2). Reference implementation: `exlibris/scripts/deploy.sh`.
 
 **Evidence:**
 
@@ -418,11 +457,11 @@ CPUQuota=<appropriate-limit>
 | Phase | Name | Purpose |
 |-------|------|---------|
 | 1 | **Initialization** | Constants, color codes, CLI argument parsing, cleanup traps |
-| 2 | **Pre-flight checks** | Validate user (must be root), required tools, directories, `.env` exists, disk space, available memory |
+| 2 | **Pre-flight checks** | Validate user (must be root), required tools, directories, `.env` exists **and contains no inline comments** (§6), disk space, available memory |
 | 3 | **Database backup** | Integrity check on live DB, timestamped copy, verify backup integrity, rotate old backups |
-| 4 | **Git operations** | `git fetch origin main`, `git pull origin main`, fix ownership with `chown` |
+| 4 | **Git operations** | `git fetch origin`, `git reset --hard origin/main`, fix ownership with `chown` |
 | 5 | **Dependencies** | `pip install` or `npm ci`, upgrading package managers first |
-| 6 | **Permissions** | `chown -R` to service user, `chmod` for `.env` (600), databases (640), scripts (755) |
+| 6 | **Permissions** | `chown -R` to service user, `chmod` for `.env` (600), databases (640), scripts (755) — every `chmod` target must already be **committed at that mode** (§25) |
 | 7 | **Services** | Stop services, copy unit files from `deployment/` to `/etc/systemd/system/`, `daemon-reload`, start, enable |
 | 8 | **Verification** | Health checks (curl for web services), service status, database integrity, deployment summary |
 
@@ -635,22 +674,29 @@ Deploy scripts that still use this approach handle it automatically in the Git p
 
 **Execute bit:**
 
-Windows does not track the execute permission. After every git pull, deploy scripts explicitly set:
-
-```bash
-chmod +x /srv/<project>/scripts/*.sh
-```
-
-This is why scripts are invoked with `sudo bash scripts/deploy.sh` rather than `./scripts/deploy.sh` -- it sidesteps the execute-bit issue entirely.
-
-**Pitfall:** If a shell script is committed from Windows without explicitly setting the executable bit in git, it is stored as mode `100644`. On Linux, the deploy script's `chmod 755` then flips it to `100755` on every run, leaving `git status` showing the file as modified after every clean deployment. Fix by committing the correct mode once:
+Windows does not track the execute permission, so a `.sh` committed from Windows is stored as mode `100644` unless the bit is set explicitly. **Set it in git, once, when the script is first committed:**
 
 ```bash
 git add --chmod=+x scripts/deploy.sh
-git commit -m "Fixed: mark deploy.sh as executable in git (mode 100755)"
+git commit -m "Added: deploy script (mode 100755)"
 ```
 
-After that, `chmod 755` in the deploy script is a no-op from git's perspective.
+There are two separate problems here, and they have different fixes. Conflating them is why this keeps recurring:
+
+| Problem | Symptom | Fix |
+|---------|---------|-----|
+| The script is not **executable** on the server | `./scripts/deploy.sh` → `Permission denied` | Invoke as `sudo bash scripts/deploy.sh`. This genuinely sidesteps the execute bit — no chmod needed to *run* a script. |
+| The committed **mode** does not match what the deploy script sets | `git status` dirty after every clean deploy; next `git pull` aborts with "local changes would be overwritten", but `git diff` is **empty** | Commit the mode (`git add --chmod=+x`). A `chmod` in the deploy script cannot fix this — it *is* this. |
+
+Invoking via `bash` solves the first and does nothing for the second. If the deploy script's permissions phase runs `chmod 755` on a tracked `.sh` that git has as `100644`, every clean deployment dirties the checkout and blocks the following pull. Committing the correct mode makes that `chmod` a no-op from git's perspective, at which point it is harmless (and still useful as a self-heal for files restored from a backup or copied by hand).
+
+Audit any repo for scripts that are committed non-executable:
+
+```bash
+git ls-files -s -- '*.sh' | grep 100644
+```
+
+This is one instance of a general rule — a deploy script must never mutate a tracked file's git-visible state. See §25.
 
 **Database files:**
 
@@ -736,9 +782,13 @@ sudo ufw allow ssh           # ALWAYS first -- prevents lockout
 
 | Project | Inbound Port | Rule |
 |---------|-------------|------|
+| tavira | 8000 | `sudo ufw allow 8000/tcp` |
 | artbots | 8010 | `sudo ufw allow 8010/tcp` |
 | boekwinkeltjes | 8005 | `sudo ufw allow 8005/tcp` |
 | fedi-dashboard | 8015 | `sudo ufw allow 8015/tcp` |
+| ubuntu-monitor | 8020 | `sudo ufw allow 8020/tcp` |
+| pinax | 8100 | `sudo ufw allow 8100/tcp` |
+| exlibris | 8110 | `sudo ufw allow 8110/tcp` |
 | fedi-monitor | none | Outbound-only (no rules needed) |
 
 **Deploy script integration:** All three deploy scripts have a `--setup-firewall` flag that configures UFW rules specific to the project. This is typically run once during initial setup.
@@ -896,9 +946,13 @@ Every `docs/deployment.md` must include a dedicated Troubleshooting section cove
 3. **Web interface not responding** — port check (`ss -tlnp | grep <port>`), service restart, `ufw status`
 4. **Line ending issues** — `dos2unix` fix for scripts and service files (applies to all Windows-developed projects)
 5. **Git pull blocked by local changes** — all three resolution options (reset, checkout, stash) with ✅/❌ safety labels on when to use `git reset --hard origin/main`
-6. **Project-specific issues** — e.g. database locked/access denied, timer not firing, cross-service permission issues
+6. **`.env` misread by systemd** — a service failing with an error that visibly contains its own comment text (e.g. `unknown MAIL_SOURCE 'imap    # imap | gmail'`) means an inline comment in `.env`. Must state that manual CLI runs will NOT reproduce it, and give the audit command from §6.
+7. **`sudo` requirements that fail silently or misleadingly** — at minimum `journalctl -u <service>` (without `sudo` it prints `-- No entries --`, which reads as "never ran") and any command touching `/root/.ssh/` (without `sudo`, `Permission denied (publickey)`, which reads as "bad key"). Commands whose failure mode *looks like a different problem* must be shown with `sudo` in the docs.
+8. **Project-specific issues** — e.g. database locked/access denied, timer not firing, cross-service permission issues
 
-**Rationale:** Routine updates are the most common operation. Putting them first means the reader finds what they need immediately. First-time installation is a one-time event and can be longer and more detailed. These six troubleshooting categories cover the failure modes that actually occur across the project fleet — standardising them ensures any operator can diagnose a problem on an unfamiliar project using the same mental model.
+Item 5 must additionally cover the **mode-only diff** sub-case: `git diff` empty while `git diff --summary` shows `mode change 100644 => 100755` (see §4 and §25).
+
+**Rationale:** Routine updates are the most common operation. Putting them first means the reader finds what they need immediately. First-time installation is a one-time event and can be longer and more detailed. These eight troubleshooting categories cover the failure modes that actually occur across the project fleet — standardising them ensures any operator can diagnose a problem on an unfamiliar project using the same mental model. Categories 6 and 7 were added after the exlibris deployment, where all three failures were *already documented somewhere* but not where the operator was looking.
 
 **Evidence:** artbots, fedi-monitor, and boekwinkeltjes-scraper all include these files. boekwinkeltjes has the most comprehensive documentation with 5 separate deployment-related markdown files.
 
@@ -930,10 +984,15 @@ Developer (Windows) -> git push -> SSH to server -> sudo bash scripts/deploy.sh
 
 ```bash
 cd /srv/<project>
-sudo git pull origin main
+sudo git fetch origin
+sudo git reset --hard origin/main
 sudo chown -R <user>:<user> /srv/<project>
 sudo bash scripts/deploy.sh
 ```
+
+> **This also applies when a new pre-flight check was added, not just when the script logic changed.** Phase 2 (pre-flight) runs *before* Phase 4 (git operations), so a check added in commit N does not execute on the deploy that pulls commit N — it first runs on the deploy after that. Updating the checkout manually closes the gap.
+
+`fetch` + `reset --hard` rather than `git pull` for the reasons in §4: production matches the remote exactly, and `reset` does not abort on local drift.
 
 **Evidence:** This workflow is documented in all three projects' deployment guides and quick reference sheets. The "pull first if deploy.sh changed" caveat is called out explicitly.
 
@@ -1007,10 +1066,27 @@ sudo bash scripts/deploy.sh --check
 
 | Port | Project | Component |
 |------|---------|-----------|
+| 8000 | tavira | Web catalog + admin (gunicorn + UvicornWorker) |
 | 8005 | boekwinkeltjes-scraper | Web interface (gunicorn) |
 | 8010 | artbots | GUI dashboard (Node.js) |
 | -- | fedi-monitor | No web interface (outbound-only) |
 | 8015 | fedi-dashboard | Web dashboard (gunicorn) |
+| 8020 | ubuntu-monitor | Web dashboard (gunicorn) |
+| 8100 | pinax | Bookmark API server (uvicorn) |
+| 8110 | exlibris | Digest web interface (gunicorn) |
+
+> **Keep this table honest, and verify against the server before claiming a port.** It is only
+> useful if it matches reality. Two entries were wrong until 2026-07-26: `ubuntu-monitor` (8020)
+> was missing entirely, and 8100 was attributed to `hermes-bookmark`, the former name of what is
+> now `pinax`. exlibris was allocated 8020 on the strength of this table, deployed, and collided
+> with ubuntu-monitor — the web service crash-looped while `systemctl is-active` still reported
+> `active`, so the deploy looked clean. Confirm with the server itself before picking a port:
+>
+> ```bash
+> sudo ss -tlnp | grep -E ':(80|81)[0-9]{2}\s'
+> ```
+>
+> Then add the row here in the same commit that adds the service file.
 
 ---
 
@@ -1343,6 +1419,46 @@ This is safe to include on Windows (the `platform.system()` guard prevents the L
 | Feb 24 (after `family=AF_INET`) | ~expected <2% | ~1% | ~15 min | — |
 
 Feb 24 regression confirmed that `sock_connect=8` combined with broken IPv6 routing is more destructive than the original FD limit problem. `curl -6 --max-time 5 https://mastodon.social` on hofnetserver returned an immediate failure confirming no IPv6 routing. Fix: `family=socket.AF_INET` on `TCPConnector`.
+
+---
+
+## 25. Deploy Scripts Must Not Dirty the Checkout
+
+**Rule:** A deploy script must never change a tracked file's git-visible state — **content, line endings, or mode**. If the server needs a file in a particular state, commit it in that state.
+
+**Rationale:** Any such mutation leaves the working tree dirty after a clean deployment. The next `git pull` then aborts with `error: Your local changes to the following files would be overwritten by merge`, and the operator investigates a file that has **no content difference at all** — `git diff` prints nothing. That combination is maximally confusing and burns a debugging session every time. The problem is also silent until the *next* deploy, so it is never noticed by whoever introduced it.
+
+This is a generalisation of a fix the fleet already made once. §13 replaced a post-pull `dos2unix` loop with `.gitattributes` precisely because "converting a tracked file's line endings creates a local modification that blocks the next `git pull`" — it "prevents the problem at the source rather than fixing it after the fact". The execute bit is the same failure mode. The principle was correct; it was just never stated as a rule that covers the next variant.
+
+**The invariant.** After any successful deployment, on the server:
+
+```bash
+sudo git status --short     # MUST be empty
+```
+
+Anything printed here is a bug in the deploy script, not a fact of life. Treat it as a release blocker: it will break the next deployment.
+
+**Settled instances:**
+
+| Mutation | Wrong (fix after the fact) | Right (prevent at the source) |
+|----------|---------------------------|-------------------------------|
+| Line endings | `dos2unix` after every pull | `.gitattributes` with `eol=lf` (§13) |
+| Execute bit / file mode | `chmod +x` on a file committed `100644` | `git add --chmod=+x <file>` once, at commit time (§13) |
+| Generated/derived files | writing them into the working tree | write to `data/` (gitignored), never alongside source |
+
+**Audit — find scripts committed non-executable that a deploy script later chmods:**
+
+```bash
+# In each repo:
+git ls-files -s -- '*.sh' | grep 100644          # committed non-executable
+grep -nE 'chmod.*(\+x|755)' scripts/deploy.sh    # what the script chmods
+```
+
+A file appearing in **both** outputs is the bug. Neither alone is a problem, which is why this hides: a project is safe if its scripts happen to be committed `100755`, *or* if its deploy script happens not to chmod them. Most projects in the fleet are safe by coincidence rather than by rule — one added `chmod` line, or one `.sh` committed from Windows, flips them.
+
+**Sanctioned exception:** §23's `git update-index --assume-unchanged` covers tracked files that must legitimately differ on the server. It applies to intentionally-divergent **content** only. Never use it to paper over a mode difference — fix the committed mode instead, since `--assume-unchanged` hides the drift without removing it and will surprise the next person who resets the flag.
+
+**Evidence:** exlibris shipped with `scripts/deploy.sh` committed as `100644` while its own Phase 6 ran `chmod 755` on that same file. Every deployment left the checkout dirty; the failure surfaced later as a blocked `git pull` with an empty diff. Both halves of the fix were already documented (§13) but in a section nobody reads while writing a permissions phase.
 
 ---
 
