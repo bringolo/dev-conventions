@@ -97,7 +97,7 @@ This is a documentation-only repository containing cross-project development and
 |------|---------|
 | `development_principles.md` | 17 development conventions (how code is written) |
 | `development_audit.md` | Per-project compliance tracking against the conventions |
-| `deployment_principles.md` | 22 deployment conventions (how code reaches the server) |
+| `deployment_principles.md` | 26 deployment conventions (how code reaches the server) |
 | `claude_template.md` | CLAUDE.md template for new projects |
 
 ### Editing Guidelines

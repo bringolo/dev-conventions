@@ -31,6 +31,7 @@ Cross-project reference documenting the deployment conventions shared by **artbo
 23. [Tracked Files with Intentional Local Overrides](#23-tracked-files-with-intentional-local-overrides)
 24. [Large-Scale Scraping: Ubuntu Network Tuning](#24-large-scale-scraping-ubuntu-network-tuning) *(includes IPv6 routing check)*
 25. [Deploy Scripts Must Not Dirty the Checkout](#25-deploy-scripts-must-not-dirty-the-checkout)
+26. [Deployment Verification Must Wait for Service Readiness](#26-deployment-verification-must-wait-for-service-readiness)
 
 ---
 
@@ -137,6 +138,13 @@ sudo chown -R <user>:<user> /srv/<project>
 sudo git config --global --add safe.directory /srv/<project>   # for root / sudo git
 git config --global --add safe.directory /srv/<project>        # for the human user jahof
 ```
+
+**Ordering requirement:** A root-owned clone must be transferred to the service user before
+the first command run as that user, including virtual-environment creation or dependency
+installation. Otherwise the first installation fails with `Permission denied` while trying to
+create files below `/srv/<project>`. Project deployment guides must therefore place the recursive
+`chown` after the clone and before any `sudo -u <user> ...` command. A later ownership repair may
+still be required after root creates configuration or runtime files.
 
 **Safe directory configuration** is not optional and must be set for **both** root and the human user (jahof). The `chown` hands the working tree to the service user, but `deploy.sh` runs git as root, and git refuses to operate on a repository owned by someone else. Skip it and every deploy dies in the git phase with:
 
@@ -463,7 +471,11 @@ CPUQuota=<appropriate-limit>
 | 5 | **Dependencies** | `pip install` or `npm ci`, upgrading package managers first |
 | 6 | **Permissions** | `chown -R` to service user, `chmod` for `.env` (600), databases (640), scripts (755) — every `chmod` target must already be **committed at that mode** (§25) |
 | 7 | **Services** | Stop services, copy unit files from `deployment/` to `/etc/systemd/system/`, `daemon-reload`, start, enable |
-| 8 | **Verification** | Health checks (curl for web services), service status, database integrity, deployment summary |
+| 8 | **Verification** | Bounded startup-aware health checks (curl for web services), service status, database integrity, deployment summary |
+
+Web-service verification must follow the bounded retry pattern in §26. A successful
+`systemctl restart` or `systemctl is-active` result does not prove that the application has bound
+its socket yet.
 
 **Phase 8 — Deployment summary:**
 
@@ -1459,6 +1471,51 @@ A file appearing in **both** outputs is the bug. Neither alone is a problem, whi
 **Sanctioned exception:** §23's `git update-index --assume-unchanged` covers tracked files that must legitimately differ on the server. It applies to intentionally-divergent **content** only. Never use it to paper over a mode difference — fix the committed mode instead, since `--assume-unchanged` hides the drift without removing it and will surprise the next person who resets the flag.
 
 **Evidence:** exlibris shipped with `scripts/deploy.sh` committed as `100644` while its own Phase 6 ran `chmod 755` on that same file. Every deployment left the checkout dirty; the failure surfaced later as a blocked `git pull` with an empty diff. Both halves of the fix were already documented (§13) but in a section nobody reads while writing a permissions phase.
+
+---
+
+## 26. Deployment Verification Must Wait for Service Readiness
+
+**Rule:** After starting or restarting a long-running service, deployment verification must poll
+its liveness and readiness endpoints with a bounded retry loop. It must not assume that a
+successful `systemctl restart` or `active` state means the listening socket is ready.
+
+**Rationale:** systemd reports a simple service as active as soon as its process starts. Web
+servers commonly need another second or more to import the application, start workers, and bind
+their socket. A single immediate `curl` therefore produces a false deployment failure even though
+the service becomes healthy moments later.
+
+**Required behavior:**
+
+- use one shared verification helper for normal deploys, `--verify`, `--restart-only`, and rollback;
+- retry both liveness and readiness endpoints at a short interval for a documented, finite window;
+- stop early if systemd reports that the service has failed;
+- return a non-zero service error after the retry budget is exhausted and identify the failed URL;
+- never use an unbounded wait, and do not substitute one fixed `sleep` for active polling.
+
+**Bash pattern:**
+
+```bash
+HEALTH_CHECK_ATTEMPTS=30
+HEALTH_CHECK_INTERVAL=1
+
+wait_for_http_endpoint() {
+    local url="$1"
+    local attempt
+
+    for ((attempt = 1; attempt <= HEALTH_CHECK_ATTEMPTS; attempt++)); do
+        curl -fsS --max-time 5 "${url}" >/dev/null && return 0
+        systemctl is-active --quiet "${SERVICE}" || return "${E_SERVICE}"
+        ((attempt < HEALTH_CHECK_ATTEMPTS)) && sleep "${HEALTH_CHECK_INTERVAL}"
+    done
+    return "${E_SERVICE}"
+}
+```
+
+**Evidence:** During Selago's first production deployment on 2026-09-07, systemd marked
+`selago-web.service` active at 13:31:30. The deploy script immediately received connection refused,
+while gunicorn bound port 8140 at 13:31:31 and subsequently returned HTTP 200. Bounded polling
+removes this false-negative race without hiding genuine startup failures.
 
 ---
 

@@ -16,7 +16,7 @@ This is a documentation-only repository that defines how code is written, struct
 | File | Purpose |
 |------|---------|
 | `development_principles.md` | 17 conventions covering how code is written, structured, and tested |
-| `deployment_principles.md` | 25 conventions covering how code reaches the server |
+| `deployment_principles.md` | 26 conventions covering how code reaches the server |
 | `development_audit.md` | Per-project compliance tracking with gap analysis |
 | `claude_template.md` | Template for creating `CLAUDE.md` in new projects |
 | `CLAUDE.md` | Guidance for Claude Code AI assistant when working in this repo |
