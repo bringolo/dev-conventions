@@ -801,6 +801,7 @@ sudo ufw allow ssh           # ALWAYS first -- prevents lockout
 | ubuntu-monitor | 8020 | `sudo ufw allow 8020/tcp` |
 | pinax | 8100 | `sudo ufw allow 8100/tcp` |
 | exlibris | 8110 | `sudo ufw allow 8110/tcp` |
+| selagon | 8150 | `sudo ufw allow in on tailscale0 to any port 8150 proto tcp` |
 | fedi-monitor | none | Outbound-only (no rules needed) |
 
 **Deploy script integration:** All three deploy scripts have a `--setup-firewall` flag that configures UFW rules specific to the project. This is typically run once during initial setup.
@@ -1086,6 +1087,7 @@ sudo bash scripts/deploy.sh --check
 | 8020 | ubuntu-monitor | Web dashboard (gunicorn) |
 | 8100 | pinax | Bookmark API server (uvicorn) |
 | 8110 | exlibris | Digest web interface (gunicorn) |
+| 8150 | selagon | Editing application (gunicorn), tailscale0 only |
 
 > **Keep this table honest, and verify against the server before claiming a port.** It is only
 > useful if it matches reality. Two entries were wrong until 2026-07-26: `ubuntu-monitor` (8020)
